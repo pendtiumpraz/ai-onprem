@@ -1,0 +1,26 @@
+# Environment files (deploy-specific, never commit)
+.env
+.env.local
+.env.production
+
+# Override files
+docker-compose.override.yml
+
+# Model weights — JANGAN commit (GB-scale, user-downloaded)
+models/*
+!models/.gitkeep
+
+# TLS certs
+tls/
+*.pem
+*.key
+*.crt
+
+# Runtime data
+prometheus-data/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

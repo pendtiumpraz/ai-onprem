@@ -1,0 +1,228 @@
+#
+# Privasimu Nexus — On-Premise AI Stack
+# docker-compose.yml
+#
+# Multi-profile support via COMPOSE_PROFILES (set di .env dari profile terpilih):
+#   vlm-fallback   → Aktifkan Qwen2.5-VL-7B sebagai separate VLM service (profile qwen3-32b)
+#                    Kosong → Built-in VLM mode (profile qwen3.6-27b)
+#
+
+name: privasimu-ai
+
+networks:
+  ai-internal:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  nginx-cache:
+
+services:
+  # ==========================================================================
+  # vLLM — Primary LLM (chat + optional native VLM)
+  # ==========================================================================
+  vllm:
+    image: ${VLLM_IMAGE}
+    container_name: privasimu-vllm
+    restart: unless-stopped
+    runtime: nvidia
+    shm_size: 16gb
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${VLLM_GPU_ID}']
+              capabilities: [gpu]
+    environment:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    command: >
+      sh -c '
+      exec python -m vllm.entrypoints.openai.api_server
+      --model /models/${LLM_MODEL_DIR}
+      --served-model-name ${LLM_SERVED_NAME}
+      --tensor-parallel-size ${LLM_TP_SIZE}
+      --max-model-len ${LLM_MAX_CONTEXT}
+      --gpu-memory-utilization ${LLM_GPU_MEM_UTIL}
+      --port 8000
+      --host 0.0.0.0
+      --enable-auto-tool-choice
+      --tool-call-parser hermes
+      --dtype auto
+      ${LLM_QUANTIZATION:+--quantization ${LLM_QUANTIZATION}}
+      '
+    volumes:
+      - ${MODELS_DIR}:/models:ro
+    networks:
+      - ai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  # ==========================================================================
+  # VLM Fallback — Separate Qwen2.5-VL-7B (hanya aktif di profile qwen3-32b)
+  # Aktivasi via COMPOSE_PROFILES=vlm-fallback di .env
+  # ==========================================================================
+  vlm-fallback:
+    image: ${VLLM_IMAGE}
+    container_name: privasimu-vlm
+    restart: unless-stopped
+    profiles: ["vlm-fallback"]
+    runtime: nvidia
+    shm_size: 8gb
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${VLM_GPU_ID}']
+              capabilities: [gpu]
+    environment:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+    command: >
+      sh -c '
+      exec python -m vllm.entrypoints.openai.api_server
+      --model /models/${VLM_MODEL_DIR}
+      --served-model-name ${VLM_SERVED_NAME}
+      --max-model-len ${VLM_MAX_CONTEXT}
+      --gpu-memory-utilization ${VLM_GPU_MEM_UTIL}
+      --port 8001
+      --host 0.0.0.0
+      --dtype auto
+      --limit-mm-per-prompt image=4
+      ${VLM_QUANTIZATION:+--quantization ${VLM_QUANTIZATION}}
+      '
+    volumes:
+      - ${MODELS_DIR}:/models:ro
+    networks:
+      - ai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ==========================================================================
+  # TEI — Text Embeddings Inference (bge-m3)
+  # ==========================================================================
+  embeddings:
+    image: ${TEI_IMAGE}
+    container_name: privasimu-embeddings
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${TEI_GPU_ID}']
+              capabilities: [gpu]
+    environment:
+      - HF_HUB_OFFLINE=1
+    command:
+      - --model-id
+      - /models/${EMBED_MODEL_DIR}
+      - --port
+      - "80"
+      - --max-batch-tokens
+      - "16384"
+      - --max-concurrent-requests
+      - "128"
+    volumes:
+      - ${MODELS_DIR}:/models:ro
+    networks:
+      - ai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:80/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ==========================================================================
+  # PaddleOCR — Quick OCR (KTP, form fisik, high-volume low-latency)
+  # ==========================================================================
+  ocr:
+    image: ${OCR_IMAGE}
+    container_name: privasimu-ocr
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${OCR_GPU_ID}']
+              capabilities: [gpu]
+    environment:
+      - OCR_LANG=${OCR_LANG}
+    networks:
+      - ai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8868/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  # ==========================================================================
+  # NGINX — Reverse proxy + TLS
+  # ==========================================================================
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: privasimu-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_HTTP_PORT}:80"
+      - "${GATEWAY_HTTPS_PORT}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ${TLS_DIR}:/etc/nginx/tls:ro
+      - nginx-cache:/var/cache/nginx
+    networks:
+      - ai-internal
+    depends_on:
+      vllm:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ==========================================================================
+  # Prometheus
+  # ==========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: privasimu-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${METRICS_RETENTION}
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT}:9090"
+    networks:
+      - ai-internal

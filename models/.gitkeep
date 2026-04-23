@@ -1,0 +1,11 @@
+# Model weight directory
+#
+# Jangan commit file di dalam folder ini. Model weight di-download on-site
+# oleh admin klien via `scripts/download-models.sh`.
+#
+# Expected structure setelah download:
+#   models/Qwen3-32B-AWQ/     — LLM primary (~20 GB)
+#   models/bge-m3/            — Embedding (~2 GB)
+#   models/Qwen2.5-VL-7B/     — VLM fallback (opsional, ~15 GB)
+#
+# Total footprint: ~25-40 GB

@@ -1,0 +1,31 @@
+#
+# Privasimu Nexus — Prometheus Scrape Config
+#
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: privasimu-onprem
+
+scrape_configs:
+  # vLLM exposes Prometheus metrics di /metrics
+  - job_name: 'vllm'
+    static_configs:
+      - targets: ['privasimu-vllm:8000']
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # TEI embeddings
+  - job_name: 'embeddings'
+    static_configs:
+      - targets: ['privasimu-embeddings:80']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    metrics_path: /metrics
+    scrape_interval: 30s
