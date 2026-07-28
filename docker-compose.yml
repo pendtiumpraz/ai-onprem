@@ -16,6 +16,9 @@ networks:
 volumes:
   prometheus-data:
   nginx-cache:
+  # Cache unduhan model saat sidecar embed-onnx berjalan pada mode blob,
+  # supaya restart container tidak mengunduh ulang.
+  embed-onnx-cache:
 
 services:
   # ==========================================================================
@@ -152,6 +155,42 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+
+  # ==========================================================================
+  # Embed ONNX — model embedding kecil (int8) di CPU
+  # ==========================================================================
+  # Pendamping service `embeddings` di atas, bukan penggantinya. TEI melayani
+  # bge-m3 fp16 di GPU; sidecar ini melayani model 23-118 MB di CPU untuk
+  # deployment tanpa GPU. Dipakai oleh mode "local" dan "blob" pada panel root
+  # Platform Config -> Model Embedding.
+  #
+  # Profil `cpu-embed` membuatnya tidak ikut naik secara default:
+  #   docker compose --profile cpu-embed up -d embed-onnx
+  embed-onnx:
+    build: ./embed-onnx
+    container_name: privasimu-embed-onnx
+    restart: unless-stopped
+    profiles: ["cpu-embed"]
+    environment:
+      - PORT=8091
+      - MODELS_DIR=/models
+      - CACHE_DIR=/tmp/embed-cache
+      - EMBED_MODEL=${EMBED_ONNX_MODEL:-minilm-l6-v2}
+      # Wajib diisi untuk mode blob; kosongkan bila hanya memakai mode local.
+      - BLOB_BASE_URL=${EMBED_ONNX_BLOB_URL:-}
+    volumes:
+      # Direktori yang sama dengan AI_EMBEDDING_MODELS_DIR di .env backend —
+      # panel root menulis ke sana, sidecar membacanya.
+      - ${MODELS_DIR}:/models:ro
+      - embed-onnx-cache:/tmp/embed-cache
+    networks:
+      - ai-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8091/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ==========================================================================
   # PaddleOCR — Quick OCR (KTP, form fisik, high-volume low-latency)

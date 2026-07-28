@@ -1,0 +1,17 @@
+{
+  "name": "privasimu-embed-onnx",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sidecar embedding ONNX int8 (CPU) dengan kontrak HTTP kompatibel TEI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.3.1",
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

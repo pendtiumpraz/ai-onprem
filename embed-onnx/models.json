@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Cermin dari katalog di backend/config/embedding_models.php.",
+    "Kalau menambah/mengubah model di sana, perbarui juga berkas ini —",
+    "backend yang mengunduh artefaknya, sidecar ini yang menjalankannya,",
+    "dan keduanya harus sepakat soal pooling serta imbuhan query/passage.",
+    "Salah pooling tidak memunculkan error, hanya menurunkan kualitas",
+    "pencarian secara diam-diam, jadi nilainya sengaja eksplisit di sini."
+  ],
+  "models": {
+    "minilm-l6-v2": {
+      "repo": "Xenova/all-MiniLM-L6-v2",
+      "dimension": 384,
+      "maxTokens": 256,
+      "pooling": "mean",
+      "normalize": true,
+      "prefix": { "query": "", "passage": "" }
+    },
+    "bge-small-en-v15": {
+      "repo": "Xenova/bge-small-en-v1.5",
+      "dimension": 384,
+      "maxTokens": 512,
+      "pooling": "cls",
+      "normalize": true,
+      "prefix": {
+        "query": "Represent this sentence for searching relevant passages: ",
+        "passage": ""
+      }
+    },
+    "multilingual-e5-small": {
+      "repo": "Xenova/multilingual-e5-small",
+      "dimension": 384,
+      "maxTokens": 512,
+      "pooling": "mean",
+      "normalize": true,
+      "prefix": { "query": "query: ", "passage": "passage: " }
+    }
+  },
+  "files": [
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "onnx/model_quantized.onnx"
+  ]
+}
