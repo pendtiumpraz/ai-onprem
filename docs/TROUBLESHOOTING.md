@@ -150,6 +150,8 @@ Reload:
 docker compose exec gateway nginx -s reload
 ```
 
+Kalau yang terputus justru **request non-streaming dari backend** (log backend: `cURL error 28` / `Operation timed out` setelah ~180 dtk), yang habis adalah timeout sisi backend: naikkan `AI_TIMEOUT` di `backend/.env.onprem` (diteruskan ke `backend` dan `queue-worker` oleh compose on-prem), lalu `up -d backend queue-worker`. Jaga tetap di bawah `proxy_read_timeout` gateway.
+
 ---
 
 ### 6. Rate Limit 429 Terlalu Aggressive
@@ -157,16 +159,27 @@ docker compose exec gateway nginx -s reload
 **Gejala:**
 User dapat `429 Too Many Requests` padahal cuma sedikit concurrent.
 
+**Diagnosa:** kuota dihitung per tenant (header `X-Privasimu-Tenant`) dengan plafon gabungan per IP. Lihat tenant mana yang kena:
+```bash
+docker exec privasimu-gateway sh -c "grep ' 429 ' /var/log/nginx/ai-access.log | grep -o 'tenant=[^ ]*' | sort | uniq -c | sort -rn"
+```
+- Satu `tenant=<hash>` dominan → kuota per tenant (`ai_chat`) terlalu kecil untuk tenant itu.
+- Banyak tenant sekaligus → plafon gabungan (`ai_chat_ip`) yang habis.
+- `tenant=-` (header kosong) → request dari jalur backend yang belum mengirim header (AI Agent streaming, AI Chat, OCR vision, cadangan PaddleOCR, embedding); semuanya berbagi ember per-IP. Lihat known limitations di `PRIVASIMU_INTEGRATION.md`.
+
 **Solusi:**
 Edit `nginx/nginx.conf`:
 ```nginx
-limit_req_zone $binary_remote_addr zone=ai_chat:10m rate=100r/m;   # dari 30r/m
+limit_req_zone $ai_rate_key         zone=ai_chat:10m    rate=60r/m;    # per tenant, dari 30r/m
+limit_req_zone $binary_remote_addr  zone=ai_chat_ip:10m rate=600r/m;   # total, dari 300r/m
 ```
 
-Atau turunkan burst di `nginx/conf.d/ai-services.conf`:
+Atau naikkan burst di `nginx/conf.d/ai-services.conf`:
 ```nginx
 limit_req zone=ai_chat burst=50 nodelay;   # dari burst=20
 ```
+
+Cek & reload: `docker exec privasimu-gateway nginx -t && docker exec privasimu-gateway nginx -s reload`.
 
 ---
 
@@ -182,7 +195,7 @@ Browser atau curl reject self-signed cert.
 # curl
 curl -k https://...
 ```
-Backend Privasimu **tidak** punya opsi `allow_self_signed`. Chat/vision men-skip verifikasi TLS hanya bila System Settings → Deployment = `onprem` **dan** API Base URL memakai IP privat (mis. `https://10.0.0.50/v1`). Embedding TEI selalu verifikasi — untuk RAG pakai opsi B.
+Backend Privasimu **tidak** punya opsi `allow_self_signed`. Semua panggilan backend (chat, vision, embedding TEI, cadangan PaddleOCR) memakai kebijakan TLS yang sama (`OutboundHttp`): verifikasi di-skip hanya bila mode `onprem` **dan** URL memakai IP privat / `localhost` / `*.local`; hostname DNS internal butuh CA internal di `AI_CA_BUNDLE` (bundle gabungan CA sistem + CA internal). Jadi self-signed cukup bila semua URL memakai IP privat (mis. `https://10.0.0.50/v1`, `/embed`, `/ocr`); untuk hostname DNS pakai opsi B.
 
 **B. Untuk production** — cert server yang diterbitkan CA internal klien (SAN memuat IP/DNS gateway):
 ```bash
@@ -193,7 +206,7 @@ cp ai-gateway-privkey.pem   /opt/privasimu/tls/privkey.pem
 # Restart gateway
 docker compose restart gateway
 ```
-Lalu pastikan CA internal dipercaya container backend dan queue-worker Privasimu — lihat [PRIVASIMU_INTEGRATION.md Step 4](./PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway).
+Lalu pastikan CA internal dipercaya container backend dan queue-worker Privasimu (`AI_CA_BUNDLE` berisi CA sistem + CA internal, atau ganti trust store container) — lihat [PRIVASIMU_INTEGRATION.md Step 4](./PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway).
 
 ---
 
@@ -214,7 +227,7 @@ Common causes:
 - GPU memory conflict dengan vLLM — set `OCR_GPU_ID=1` (kalau ada GPU kedua)
 - CUDA driver version mismatch — image expect CUDA 11.7, driver terlalu lama
 
-**Workaround** — disable service OCR (comment service `ocr` di `docker-compose.yml`). Backend Privasimu saat ini tidak memanggil `/ocr/` (OCR-nya Tesseract lokal + model vision), jadi mematikan PaddleOCR tidak memengaruhi fitur backend.
+**Workaround** — disable service OCR (comment service `ocr` di `docker-compose.yml`). PaddleOCR hanya cadangan opsional backend (dipakai bila `OCR_PADDLE_URL` diisi dan Tesseract gagal); bila service mati, cek kesehatan backend gagal dan OCR langsung jatuh ke model vision — fitur backend tetap jalan.
 
 ---
 

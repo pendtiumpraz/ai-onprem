@@ -10,7 +10,7 @@ Folder ini **tidak berisi model weight** — model di-download on-site oleh admi
 |---|---|---|---|
 | **vLLM** | `vllm/vllm-openai:latest` | LLM serving (Qwen3-32B AWQ Q4) | `8000` |
 | **TEI** | `ghcr.io/huggingface/text-embeddings-inference:1.5` | Embedding serving (bge-m3, 1024 dim) | `80` |
-| **PaddleOCR** | `paddlecloud/paddleocr-gpu:latest` | OCR untuk KTP/dokumen fisik (belum dikonsumsi backend, lihat integrasi) | `8868` |
+| **PaddleOCR** | `paddlecloud/paddleocr-gpu:latest` | OCR dokumen pindaian — cadangan opsional backend saat Tesseract gagal (`OCR_PADDLE_URL`, lihat integrasi Step 6) | `8868` |
 | **NGINX** | `nginx:1.27-alpine` | Reverse proxy + TLS | `443` |
 | **Prometheus** | `prom/prometheus:latest` | Metrics collector | `9090` |
 
@@ -56,6 +56,8 @@ bash scripts/start.sh
 bash scripts/test-endpoints.sh
 bash tests/test-vision.sh   # optional: test vision capability
 ```
+
+Semua skrip, argumen, dan perintah docker compose: [`docs/PERINTAH.md`](./docs/PERINTAH.md).
 
 ## Dual Profile Strategy
 
@@ -119,6 +121,7 @@ ai-onprem/
     ├── ARCHITECTURE.md            ← How the stack fits together
     ├── TROUBLESHOOTING.md         ← Common issues + fixes
     ├── PRIVASIMU_INTEGRATION.md   ← How to connect Privasimu backend
+    ├── PERINTAH.md                ← Referensi semua skrip, tes, dan perintah docker compose
     └── MODEL_CATALOG.md           ← Model choices + quantization options
 ```
 
@@ -129,8 +132,10 @@ Provider AI di backend Privasimu **tidak** diatur lewat `.env` — ini pengatura
 1. **Platform Admin → System Settings → Deployment**: mode `onprem`.
 2. **`/settings/ai-providers`**: Tambah Provider (API Base URL `https://<gpu-server-ip>/v1`) + Tambah Model (ID Model = `LLM_SERVED_NAME`, mis. `qwen3-32b`).
 3. **Settings → AI Providers**: simpan API key (vLLM tidak memeriksa, tapi backend wajib punya key minimal 8 karakter, mis. `onprem-no-auth`), Test, lalu pilih model aktif untuk Chat / Agent / Document.
-4. Opsional RAG: **Platform Config → Model Embedding** mode `API`, lalu **System Settings → AI Embedding** provider TEI, URL `https://<gpu-server-ip>/embed` (butuh PostgreSQL + pgvector dan cert yang dipercaya backend).
+4. Opsional RAG: **Platform Config → Model Embedding** mode `API`, lalu **System Settings → AI Embedding** provider TEI, URL `https://<gpu-server-ip>/embed` (butuh PostgreSQL + pgvector — compose on-prem backend sudah memakai image `pgvector/pgvector:pg16`; instalasi lama ikuti *Upgrade ke pgvector* di `backend/docs/ONPREM_DEPLOY.md` — dan cert yang dipercaya backend).
 5. Verifikasi: `php artisan ai:cek`.
+
+Rate limit gateway **per tenant**: backend mengirim header `X-Privasimu-Tenant` (hash org_id), NGINX memakainya sebagai kunci `limit_req_zone`, dengan plafon gabungan per IP. Tuning: [Rate limit per tenant](./docs/PRIVASIMU_INTEGRATION.md#rate-limit-per-tenant).
 
 Backend on-prem juga wajib punya `APP_KEY` tetap (dibuat sekali, tidak pernah diganti). Untuk site offline, matikan setelan tenant **"AI boleh mengakses internet"**.
 
@@ -159,13 +164,13 @@ Kalau klien minta fully air-gapped (bank, pemerintah):
 3. Transfer `privasimu-ai-images.tar` + `models/` ke GPU server via USB
 4. Di GPU server: `docker load -i privasimu-ai-images.tar`
 5. Lanjut seperti biasa — sudah tidak butuh internet lagi
-6. Sisi backend Privasimu: matikan akses internet AI per tenant, nonaktifkan provider cloud, dan perhatikan screening daftar sanksi yang butuh internet — lihat [bagian offline di PRIVASIMU_INTEGRATION.md](./docs/PRIVASIMU_INTEGRATION.md#deployment-offline--air-gapped-sisi-backend)
+6. Sisi backend Privasimu: matikan akses internet AI per tenant, nonaktifkan provider cloud, dan impor daftar sanksi offline (`TPRM_SANKSI_UNDUH_ONLINE=false` + `php artisan sanksi:impor`) — lihat [bagian offline di PRIVASIMU_INTEGRATION.md](./docs/PRIVASIMU_INTEGRATION.md#deployment-offline--air-gapped-sisi-backend)
 
 ## Security Notes
 
 - GPU server **tidak boleh punya akses Internet egress** setelah setup. Firewall rule di klien-side WAJIB.
 - NGINX TLS mandatory untuk production — lihat `nginx/conf.d/ai-services.conf`
-- Gunakan cert dari CA internal klien (bukan Let's Encrypt — tidak bisa validate tanpa internet). Self-signed hanya cukup untuk chat via IP privat; embedding TEI selalu memverifikasi TLS — lihat [Step 4 integrasi](./docs/PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway)
+- Gunakan cert dari CA internal klien (bukan Let's Encrypt — tidak bisa validate tanpa internet). Self-signed cukup bila backend memanggil gateway via IP privat (chat, embedding, OCR); untuk hostname DNS internal isi `AI_CA_BUNDLE` di backend — lihat [Step 4 integrasi](./docs/PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway)
 - Model weight + tenant data store di `/opt/privasimu/` dengan `chmod 700` — hanya user `privasimu` yang akses
 
 ## Monitoring

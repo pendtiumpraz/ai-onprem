@@ -64,10 +64,11 @@ Dokumen ini menjelaskan bagaimana komponen stack AI Privasimu Nexus on-premise b
   - `/ocr/*` → `ocr:8868` (PaddleOCR, path stripped)
   - `/healthz` → static "ok"
 - **Streaming**: `proxy_buffering off` untuk SSE (LLM streaming)
-- **Rate limit zones**:
-  - `ai_chat` — 30 req/menit per IP (LLM heavy workload)
-  - `ai_embed` — 300 req/menit per IP (light)
-  - `ai_ocr` — 60 req/menit per IP
+- **Rate limit zones** — dikunci per tenant lewat header `X-Privasimu-Tenant` dari backend (tanpa header → per IP), plus plafon gabungan per IP:
+  - `ai_chat` — 30 req/menit per tenant; `ai_chat_ip` — 300 req/menit per IP (LLM heavy workload)
+  - `ai_embed` — 300 req/menit per tenant; `ai_embed_ip` — 3000 req/menit per IP (light)
+  - `ai_ocr` — 60 req/menit per tenant; `ai_ocr_ip` — 600 req/menit per IP
+  - Kena limit → HTTP 429
 
 ### 2. vLLM
 
@@ -101,7 +102,7 @@ Dokumen ini menjelaskan bagaimana komponen stack AI Privasimu Nexus on-premise b
 - **Port**: 8868 (internal)
 - **Language**: `en` (handles Indonesian + English + number)
 - **Use case**: KTP scan, form fisik, receipt OCR
-- **Status integrasi**: backend Privasimu saat ini **belum** memanggil `/ocr/`. OCR backend = Tesseract di container backend + vision fallback ke model LLM/VLM (lihat [PRIVASIMU_INTEGRATION.md](./PRIVASIMU_INTEGRATION.md#step-6--ocr-dan-vision))
+- **Status integrasi**: cadangan opsional. OCR backend = Tesseract di container backend → PaddleOCR (`POST /ocr/predict/ocr_system`, hanya bila `OCR_PADDLE_URL` diisi, Tesseract gagal/tipis, dan `GET /ocr/` sehat) → vision fallback ke model LLM/VLM (lihat [PRIVASIMU_INTEGRATION.md](./PRIVASIMU_INTEGRATION.md#step-6--ocr-paddleocr-dan-vision))
 - **Input**: base64 image, output JSON bounding box + text
 
 ### 5. Prometheus
@@ -190,7 +191,7 @@ Syarat: mode Model Embedding `api` + provider TEI di System Settings, PostgreSQL
 ## Security Boundary
 
 - GPU server **tidak punya internet egress** setelah setup (firewall rule di klien side)
-- NGINX TLS cert **wajib** untuk production. Backend Privasimu tidak punya opsi `allow_self_signed`: chat/vision men-skip verifikasi hanya bila deployment mode `onprem` dan URL memakai IP privat; embedding TEI selalu verifikasi. Pakai CA internal klien — lihat [PRIVASIMU_INTEGRATION.md Step 4](./PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway)
+- NGINX TLS cert **wajib** untuk production. Backend Privasimu tidak punya opsi `allow_self_signed`: chat, vision, embedding, dan OCR men-skip verifikasi hanya bila deployment mode `onprem` dan URL memakai IP privat; hostname DNS diverifikasi (CA internal lewat `AI_CA_BUNDLE`). Pakai CA internal klien — lihat [PRIVASIMU_INTEGRATION.md Step 4](./PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway)
 - Token auth optional via NGINX — activate kalau klien minta
 - Model weight + config file di `/opt/privasimu/` dengan `chown privasimu:privasimu chmod 700`
 

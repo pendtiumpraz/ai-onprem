@@ -70,8 +70,8 @@ Tidak perlu restart backend. Buka dashboard → AI Agent → test chat. Detail (
 ## Common Gotchas
 
 1. **vLLM OOM saat startup** — turunkan `LLM_GPU_MEM_UTIL` dari 0.80 ke 0.70.
-2. **TLS cert invalid** — backend Privasimu tidak punya opsi `allow_self_signed`. Chat hanya men-skip verifikasi bila mode `onprem` **dan** URL memakai IP privat; embedding TEI selalu verifikasi, jadi CA gateway harus dipercaya container backend. Lihat Step 4 di integrasi.
-3. **Rate limit 429** — semua request backend datang dari satu IP, jadi zona `ai_chat` (30 r/menit) dibagi semua user. Naikkan `limit_req_zone` di `nginx/nginx.conf` / `burst` di `nginx/conf.d/ai-services.conf`.
+2. **TLS cert invalid** — backend Privasimu tidak punya opsi `allow_self_signed`. Chat, embedding, dan OCR men-skip verifikasi hanya bila mode `onprem` **dan** URL memakai IP privat; untuk hostname DNS isi `AI_CA_BUNDLE` (CA sistem + CA internal). Lihat Step 4 di integrasi.
+3. **Rate limit 429** — kuota `ai_chat` (30 r/menit) dihitung **per tenant** lewat header `X-Privasimu-Tenant` dari backend, ditambah plafon gabungan `ai_chat_ip` (300 r/menit) untuk seluruh backend. Tuning: `nginx/nginx.conf` (`rate`) / `nginx/conf.d/ai-services.conf` (`burst`) — lihat [Rate limit per tenant](./docs/PRIVASIMU_INTEGRATION.md#rate-limit-per-tenant).
 4. **vLLM slow first request** — warmup normal, request ke-2 dan seterusnya cepat.
 
 Untuk troubleshoot detail, lihat [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md).

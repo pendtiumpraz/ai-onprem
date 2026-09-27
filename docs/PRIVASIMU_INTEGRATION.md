@@ -12,11 +12,12 @@ Setelah AI stack up, langkah ini connect backend Privasimu Nexus klien ke endpoi
 - [Step 3 — API key + pilih model aktif](#step-3--api-key--pilih-model-aktif)
 - [Step 4 — TLS antara backend dan gateway](#step-4--tls-antara-backend-dan-gateway)
 - [Step 5 — Embedding (RAG) ke TEI](#step-5--embedding-rag-ke-tei)
-- [Step 6 — OCR dan vision](#step-6--ocr-dan-vision)
+- [Step 6 — OCR (PaddleOCR) dan vision](#step-6--ocr-paddleocr-dan-vision)
 - [Step 7 — Verifikasi](#step-7--verifikasi)
 - [Deployment offline / air-gapped (sisi backend)](#deployment-offline--air-gapped-sisi-backend)
 - [Kredit AI di on-prem](#kredit-ai-di-on-prem)
 - [Tuning, fallback, rollback](#tuning-fallback-rollback)
+- [Rate limit per tenant](#rate-limit-per-tenant)
 - [Known limitations backend](#known-limitations-backend)
 
 ## Prerequisites
@@ -89,27 +90,36 @@ Perubahan berlaku langsung, tanpa restart backend. Provider cloud lain di katalo
 
 ## Step 4 — TLS antara backend dan gateway
 
-Backend memakai dua jalur HTTP dengan aturan TLS berbeda:
+Semua panggilan backend ke gateway AI — chat, agent, vision OCR, test connection, **embedding TEI** (termasuk health check), dan **cadangan PaddleOCR** — lewat satu pintu `App\Support\OutboundHttp`, jadi aturan TLS-nya sama:
 
-| Panggilan | Kode | Verifikasi TLS |
-|---|---|---|
-| Chat, Agent, vision OCR, Test connection | `App\Support\OutboundHttp` | **Di-skip hanya jika** mode `onprem` **dan** host = `localhost`, `*.local`, atau **IP literal privat** (RFC1918). Hostname lain (mis. `ai-gw.bank.co.id`) tetap diverifikasi. |
-| Embedding TEI (+ health check) | `EmbeddingService` (`Http::` langsung) | **Selalu diverifikasi**, apa pun modenya |
+| Kondisi | Verifikasi TLS |
+|---|---|
+| Mode `saas` | **Selalu diverifikasi** |
+| Mode `onprem` + host `localhost`, `*.local`, `*.localhost`, atau **IP literal privat/reserved** (RFC1918, loopback, link-local) | **Di-skip** (self-signed internal OK) |
+| Mode `onprem` + hostname lain (mis. `ai-gw.bank.co.id`) atau IP publik | Diverifikasi, memakai trust store bawaan atau `AI_CA_BUNDLE` bila diisi |
 
 Konsekuensi praktis:
-- **Paling simpel untuk chat:** pakai IP privat di API Base URL (`https://10.0.0.50/v1`) + mode `onprem` → self-signed OK.
-- **Embedding via gateway HTTPS butuh cert yang dipercaya container backend.** Pakai cert dari CA internal klien, lalu tambahkan CA itu ke trust store container backend **dan** queue-worker. Cara yang bertahan saat container dibuat ulang — mount bundle gabungan:
+- **Paling simpel:** pakai IP privat di semua URL (`https://10.0.0.50/v1`, `https://10.0.0.50/embed`, `https://10.0.0.50/ocr`) + mode `onprem` → self-signed OK untuk chat, embedding, dan OCR sekaligus.
+- **Hostname DNS internal** (cert dari CA internal klien) → verifikasi tetap jalan. Dua cara membuat CA internal dipercaya:
+
+  **A. `AI_CA_BUNDLE` (disarankan).** Path berkas PEM yang dipakai `OutboundHttp` sebagai trust store (env `AI_CA_BUNDLE`, atau baris `system_settings` `ai.ca_bundle` yang menang atas env — belum ada di UI System Settings, jadi env adalah jalur utama). Bundle ini **menggantikan** trust store bawaan untuk **semua** panggilan keluar lewat `OutboundHttp` — termasuk provider AI cloud, server lisensi, dan server update — jadi isinya **wajib gabungan CA sistem + CA internal**. Bundle berisi CA internal saja membuat semua panggilan ke host publik gagal TLS. Path kosong atau tidak terbaca → trust store bawaan dipakai (dicatat sekali sebagai warning `OutboundHttp: AI_CA_BUNDLE tidak terbaca`).
   ```bash
   # di host backend
   cat /etc/ssl/certs/ca-certificates.crt /opt/privasimu/tls/internal-ca.crt \
     > /opt/privasimu/tls/ca-bundle-privasimu.crt
   ```
   ```yaml
-  # docker-compose override untuk service backend dan queue-worker
+  # docker-compose override untuk service backend DAN queue-worker
+  environment:
+    AI_CA_BUNDLE: /etc/privasimu/ca-bundle-privasimu.crt
   volumes:
-    - /opt/privasimu/tls/ca-bundle-privasimu.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    - /opt/privasimu/tls/ca-bundle-privasimu.crt:/etc/privasimu/ca-bundle-privasimu.crt:ro
   ```
-  Uji dari dalam container: `docker exec privasimu-backend curl -sS https://10.0.0.50/healthz` → `ok` tanpa `-k`.
+  Setelah mengubah env, buat ulang container (`up -d backend queue-worker`); entrypoint backend menjalankan ulang `config:cache`.
+
+  **B. Ganti trust store container.** Mount bundle gabungan yang sama ke `/etc/ssl/certs/ca-certificates.crt` di `backend` dan `queue-worker`. Berlaku juga untuk proses lain di container (curl, git).
+
+  Uji dari dalam container: `docker exec privasimu-backend curl -sS --cacert /etc/privasimu/ca-bundle-privasimu.crt https://ai-gw.bank.co.id/healthz` → `ok` (cara B: tanpa `--cacert`).
 - Cert harus punya **SAN** yang cocok dengan alamat di URL (IP atau DNS). Cert dengan CN saja ditolak klien TLS modern — lihat perintah `openssl` di [`QUICKSTART.md`](../QUICKSTART.md).
 
 ## Step 5 — Embedding (RAG) ke TEI
@@ -117,9 +127,10 @@ Konsekuensi praktis:
 RAG dipakai AI Agent (`search_similar_ropa/dpia/breach`) dan indexing ROPA, DPIA, Breach, asesmen pihak ketiga, Knowledge Base. **Data Discovery / PII scan tidak memakai embedding.**
 
 Syarat database:
-- PostgreSQL + pgvector. Migrasi `create_vector_embeddings_table` membuat kolom `vector(1024)` **hanya jika** `CREATE EXTENSION vector` berhasil saat migrate; kalau gagal, kolom jadi JSON dan pencarian semantik tidak jalan. Image `postgres:16-alpine` di `backend/docker/docker-compose.onprem.yml` **tidak** berisi pgvector — ganti dengan image yang punya pgvector (mis. `pgvector/pgvector:pg16`) **sebelum** migrate pertama.
-- MySQL/SQLite: menyalakan RAG ditolak (`422 RAG_REQUIRES_POSTGRES`).
-- Dimensi: bge-m3 = 1024 = kolom `vector(1024)` = `config/ai_embedding.php` (`tei.dimension`). Jangan ganti ke model TEI berdimensi lain.
+- PostgreSQL + pgvector. `backend/docker/docker-compose.onprem.yml` memakai image `pgvector/pgvector:pg16` untuk `landlord-db` dan `tenant-db`; instalasi baru memasang extension otomatis (`backend/docker/postgres-init/01-pgvector.sh`). **Instalasi lama** yang dimigrasi dengan `postgres:16-alpine` punya kolom JSON — ikuti *Upgrade ke pgvector* di `backend/docs/ONPREM_DEPLOY.md` (ganti image, `REINDEX`, `CREATE EXTENSION`, `php artisan migrate`, `php artisan embeddings:backfill`).
+- DB tenant terisolasi dibuat provisioner tanpa extension (user tenant bukan superuser). Setelah isolasi, jalankan `backend/docker/pgvector-upgrade.sql` di DB tenant itu (perintah di ONPREM_DEPLOY.md).
+- MySQL/SQLite (termasuk compose full-stack di root repo, MySQL 8): menyalakan RAG ditolak (`422 RAG_REQUIRES_POSTGRES`).
+- Dimensi: kolom `embedding` bertipe `vector` **tanpa dimensi tetap** (migrasi `2026_10_18_000001_pgvector_kolom_embedding_fleksibel`), jadi bge-m3 (1024), minilm (384), dan OpenAI (1536) semuanya diterima. Pencarian selalu difilter per `embedding_model`; setelah mengganti model, jalankan `php artisan embeddings:backfill`.
 
 Langkah (semuanya lewat UI; nilai DB menang atas env `AI_EMBEDDING_*`):
 
@@ -131,14 +142,55 @@ Langkah (semuanya lewat UI; nilai DB menang atas env `AI_EMBEDDING_*`):
    - Aktifkan RAG
 3. Index data lama: `php artisan embeddings:backfill`.
 
+TLS embedding mengikuti [Step 4](#step-4--tls-antara-backend-dan-gateway): IP privat + mode `onprem` cukup dengan self-signed; hostname DNS butuh CA yang dipercaya (`AI_CA_BUNDLE`).
+
 Alternatif tanpa TLS: kalau backend satu host Docker dengan stack AI dan container backend di-join ke network `privasimu-ai_ai-internal`, TEI Base URL bisa dibiarkan default `http://privasimu-embeddings:80`.
 
-## Step 6 — OCR dan vision
+## Step 6 — OCR (PaddleOCR) dan vision
 
-- **Backend tidak memanggil endpoint `/ocr/` (PaddleOCR).** OCR di backend (`OcrScannerService`) berjalan di dalam container backend sendiri: Tesseract (`ind`+`eng`) untuk gambar dan PDF pindaian, `smalot/pdfparser` untuk PDF berteks.
-- **Vision fallback** mengirim gambar halaman ke `POST {api_base_url}/chat/completions` dengan `image_url`. Model dipilih berurutan: model mode **Document** yang flag Vision-nya dicentang → model mode **Chat** yang Vision → provider bawaan `deepseek-vision` (cloud). Untuk site offline, pastikan salah satu dari dua yang pertama adalah model on-prem, dan provider `deepseek-vision` dinonaktifkan.
+OCR backend (`OcrScannerService`) berjalan berurutan:
+
+1. **Primer, lokal di container backend:** `smalot/pdfparser` untuk PDF berteks; Tesseract (`ind`+`eng`) untuk gambar dan halaman PDF pindaian (dirasterisasi Imagick / `pdftoppm`).
+2. **Cadangan PaddleOCR (opsional)** — dipakai **hanya bila** hasil Tesseract gagal/kosong atau di bawah `OCR_PADDLE_MIN_CHARS`, URL PaddleOCR terisi, **dan** cek kesehatan lulus. Hasil Paddle hanya dipakai bila lebih panjang dari hasil Tesseract. Tidak dikonfigurasi atau service mati → langkah ini dilewati tanpa galat (perilaku lama).
+3. **Cadangan vision** — bila teks masih di bawah ambang: gambar halaman dikirim ke `POST {api_base_url}/chat/completions` dengan `image_url`.
+
+Mesin yang menghasilkan teks tercatat di field `engine` (`tesseract`, `paddleocr`, `pdfparser`, `vision`, dst.) dan di log (`OCR cadangan ke PaddleOCR`).
+
+### Mengaktifkan cadangan PaddleOCR
+
+Isi di `backend/.env.onprem` dan teruskan ke service `backend` **dan** `queue-worker` (OCR juga berjalan di job antrean), atau atur lewat baris `system_settings` `ocr.paddle_url` / `ocr.paddle_api_key` (nilai DB menang atas env; belum ada di UI System Settings):
+
+| Env | Setting DB | Bawaan | Arti |
+|---|---|---|---|
+| `OCR_PADDLE_URL` | `ocr.paddle_url` | kosong (nonaktif) | Base URL route gateway, mis. `https://10.0.0.50/ocr` |
+| `OCR_PADDLE_API_KEY` | `ocr.paddle_api_key` | kosong | Dikirim sebagai `Authorization: Bearer <kunci>` bila diisi (mis. bila token auth NGINX diaktifkan) |
+| `OCR_PADDLE_TIMEOUT` | - | `60` | Timeout (detik, min. 5) per halaman |
+| `OCR_PADDLE_HEALTH_TTL` | - | `60` | Lama cache hasil cek kesehatan (detik) |
+| `OCR_PADDLE_MIN_CHARS` | - | `100` | Hasil Tesseract di bawah jumlah karakter ini dianggap gagal → coba Paddle |
+| `OCR_PADDLE_MIN_SCORE` | - | `0.5` | Baris hasil PaddleOCR dengan skor di bawah ini dibuang |
+
+Compose on-prem backend belum meneruskan variabel `OCR_PADDLE_*` secara bawaan; tambahkan ke blok `environment` kedua service (override), atau pakai setting DB.
+
+Kontrak yang dipanggil backend (sama dengan `tests/test-ocr.sh`):
+
+| Panggilan | Request |
+|---|---|
+| Cek kesehatan | `GET {OCR_PADDLE_URL}/` → harus 2xx (timeout 5 dtk), hasil di-cache `OCR_PADDLE_HEALTH_TTL` detik |
+| OCR per gambar/halaman | `POST {OCR_PADDLE_URL}/predict/ocr_system` body `{"images": ["<base64 tanpa prefix data:>"]}` |
+
+TLS mengikuti [Step 4](#step-4--tls-antara-backend-dan-gateway) (`OutboundHttp`, termasuk `AI_CA_BUNDLE`). PDF diproses per halaman; halaman yang gagal dilewati (log `PaddleOCR gagal`). Gateway membatasi body `/ocr/` 20 MB dan `proxy_read_timeout` 120 dtk.
+
+Uji dari host backend:
+```bash
+docker exec privasimu-backend curl -sk -o /dev/null -w '%{http_code}\n' https://10.0.0.50/ocr/   # 200
+```
+
+Mematikan service `ocr` (hemat VRAM) aman: cek kesehatan gagal dan backend langsung ke cadangan vision.
+
+### Vision
+
+- Model dipilih berurutan: model mode **Document** yang flag Vision-nya dicentang → model mode **Chat** yang Vision → provider bawaan `deepseek-vision` (cloud). Untuk site offline, pastikan salah satu dari dua yang pertama adalah model on-prem, dan provider `deepseek-vision` dinonaktifkan.
 - Policy/Contract Review mode Vision membaca **semua** halaman lewat model vision (per halaman).
-- Service `ocr` (PaddleOCR) di stack ini saat ini belum dikonsumsi backend. Boleh dibiarkan, atau dimatikan untuk menghemat VRAM (gateway tidak bergantung padanya).
 
 ## Step 7 — Verifikasi
 
@@ -170,7 +222,7 @@ UI test:
 | AI Agent | Agent → Chat | `/v1/chat/completions` + `tools`, streaming |
 | Upload file di AI Agent, import dokumen ROPA/DPIA | Document → Chat | `/v1/chat/completions` (atau `/vlm/v1/...`) |
 | Policy / Contract Review, GAP remediation, AI Document Analyzer | Chat | `/v1/chat/completions` |
-| OCR dokumen pindaian | Tesseract lokal + model Vision | `/v1/...` atau `/vlm/v1/...` |
+| OCR dokumen pindaian | Tesseract lokal → PaddleOCR (opsional) → model Vision | `/ocr/predict/ocr_system`, lalu `/v1/...` atau `/vlm/v1/...` |
 | RAG (`search_similar_*`) | Embedding TEI | `/embed/embed` |
 
 ### Tool calling
@@ -185,9 +237,18 @@ Tools AI Agent didefinisikan dan dieksekusi di backend (`AiAgentToolExecutor::ex
 Stack AI ini bisa sepenuhnya offline, tapi beberapa fitur backend tetap mencoba keluar ke internet:
 
 1. **Matikan "AI boleh mengakses internet" per tenant** — admin tenant: **Pengaturan → Compliance (Kepatuhan)** (`PUT /api/pengaturan/ai-akses-web`). Default **ON**. Kalau OFF: sumber screening `web_search`, `adverse_media`, `privacy_policy` ditolak server dan disembunyikan di UI, scan berita negatif terjadwal dilewati, ekstrak profil pihak ketiga dari URL ditolak. Analisis dokumen unggahan tetap jalan.
-2. **Daftar sanksi (OFAC SDN + UN Consolidated)** — `SanctionsListChecker` mengunduh `www.treasury.gov` dan `scsanctions.un.org` (cache 24 jam) dan **tidak** diatur oleh setelan di atas. Tanpa internet unduhan gagal diam-diam, daftar kosong ikut di-cache, dan hasil screening terbaca "tidak ada kecocokan" — **false negative**. Opsi:
-   - izinkan egress HTTPS backend hanya ke dua host itu (firewall allowlist / proxy), atau
-   - jangan pilih sumber `sanctions` saat screening dan lakukan pengecekan sanksi manual. Backend belum punya fitur impor daftar sanksi offline.
+2. **Daftar sanksi (OFAC SDN + UN Consolidated)** — `SanctionsListChecker` mengunduh `www.treasury.gov` dan `scsanctions.un.org` (tidak diatur setelan nomor 1); `sanksi:perbarui` mengunduh ulang tiap hari 01:30 (zona waktu aplikasi, UTC). Unduhan gagal tidak pernah di-cache sebagai daftar kosong; salinan baik terakhir di `storage/app/sanctions` tetap dipakai. Untuk situs tanpa internet:
+   - matikan unduhan online: env `TPRM_SANKSI_UNDUH_ONLINE=false` atau baris `system_settings` `tprm.sanksi_unduh_online=false` (DB menang; belum ada di UI). Env diteruskan ke container lewat override compose `backend` + `queue-worker`. `sanksi:perbarui` lalu berhenti tanpa galat;
+   - unduh berkas di mesin yang punya internet — `https://www.treasury.gov/ofac/downloads/sdn.csv` dan `https://scsanctions.un.org/resources/xml/en/consolidated.xml` — salin ke server, lalu impor (ulangi berkala, mis. mingguan):
+     ```bash
+     php artisan sanksi:impor /path/sdn.csv --sumber=ofac
+     php artisan sanksi:impor /path/consolidated.xml --sumber=un
+     php artisan sanksi:perbarui    # saat unduhan dimatikan: hanya menampilkan status (sumber, waktu, jumlah nama)
+     ```
+     `--sumber` bisa dihilangkan (ditebak dari ekstensi `.csv` / `.xml`). Di Docker, salin berkas ke volume storage dulu (`docker cp sdn.csv privasimu-backend:/var/www/html/storage/app/`).
+   - alternatif: izinkan egress HTTPS backend hanya ke dua host itu (firewall allowlist / proxy).
+
+   Bila satu atau kedua daftar tidak tersedia, hasil screening **tidak** lagi terbaca "tidak ada kecocokan": muncul temuan "Daftar sanksi tidak tersedia — hasil sanksi belum diperiksa" (atau "pemeriksaan sanksi tidak lengkap" bila hanya satu daftar yang hilang).
 3. **Pencarian TPRM** (DuckDuckGo default, Serper, Brave — System Settings → Pencarian TPRM, atau env `TPRM_SEARCH_PROVIDER`, `SERPER_API_KEY`, `BRAVE_SEARCH_API_KEY`) semuanya butuh internet. Tidak relevan offline selama setelan nomor 1 OFF.
 4. **Nonaktifkan provider AI cloud** di `/settings/ai-providers` (terutama `deepseek-vision`, fallback vision) supaya tidak ada panggilan keluar.
 5. **Embedding**: jangan pakai mode `blob` (mengunduh model dari Vercel Blob). Pakai mode `api` + TEI (Step 5) atau `local`.
@@ -211,23 +272,53 @@ LIMIT 100;
 ## Tuning, fallback, rollback
 
 **Tuning:**
-- `AI_TIMEOUT` (detik, default 180) — timeout HTTP ke provider untuk chat dan vision. Env ini harus diteruskan ke container backend (tidak ada di `environment:` compose on-prem secara default).
+- `AI_TIMEOUT` (detik, default 180) — timeout HTTP ke provider untuk chat dan vision. Diatur di `backend/.env.onprem`; compose on-prem meneruskannya ke `backend` **dan** `queue-worker` (blok `x-ai-env`). Jaga di bawah `proxy_read_timeout` gateway (600 dtk).
 - System Settings → AI: `ai.max_concurrent_per_user` (job AI latar per user, default 5), `ai.jobs_enabled` (kill-switch job AI → 503).
 - Backend memotong prompt di 24.000 karakter (~6.000 token) dan output di 4.000 token (`config/security.php`), jadi `LLM_MAX_CONTEXT=32768` sudah cukup.
-- **Rate limit NGINX per IP**: semua request dari backend datang dari satu IP, jadi zona `ai_chat` (30 r/menit) dibagi seluruh user dan tenant. Naikkan sesuai jumlah user (`nginx/nginx.conf`) — backend tidak mengirim header per tenant.
+- **Rate limit**: per tenant, lihat [Rate limit per tenant](#rate-limit-per-tenant).
 
 **Fallback:** kalau provider error/down, `AiService` mengembalikan `null` dan fitur menampilkan pesan gagal ke user (bukan 500). Tidak ada env fallback otomatis ke provider lain.
 
 **Rollback ke cloud:** Settings → AI Providers → pilih kembali model cloud untuk mode Chat/Agent/Document (key cloud harus tersimpan). Berlaku langsung, tanpa restart dan tanpa `config:clear`. Cache respons AI di-key per model, jadi tidak tercampur.
+
+## Rate limit per tenant
+
+Semua request backend datang dari **satu IP**, jadi dulu zona `ai_chat` (30 r/menit per IP) dibagi seluruh tenant — satu tenant yang sibuk membuat tenant lain kena 429. Sekarang:
+
+1. `AiService` (backend) mengirim header `X-Privasimu-Tenant` di setiap `chat/completions`:
+   - tenant → `HMAC-SHA256(org_id, APP_KEY)` dipotong 16 heksa (tidak bisa dibalik ke UUID, tidak bisa dikorelasikan antar-instalasi);
+   - panggilan tanpa org (platform/root, scheduler) → `platform`.
+2. `nginx/nginx.conf` memetakan header itu ke `$ai_rate_key` (`t:<nilai>`); header kosong/format aneh → `ip:<IP klien>` (perilaku lama). Zona `ai_chat`, `ai_embed`, `ai_ocr` dikunci `$ai_rate_key`, jadi **tiap tenant punya ember sendiri**.
+3. Plafon gabungan per IP (`ai_chat_ip`, `ai_embed_ip`, `ai_ocr_ip`) tetap ada, karena header dikirim klien dan bisa dipalsukan untuk mendapat ember baru. Plafon ini yang melindungi GPU.
+4. Kena limit → HTTP **429** (`limit_req_status` global, termasuk `/vlm/v1/`).
+
+Tuning (`nginx/nginx.conf` untuk `rate`, `nginx/conf.d/ai-services.conf` untuk `burst`):
+
+| Zona | Default | Arti | Naikkan bila |
+|---|---|---|---|
+| `ai_chat` | 30 r/menit, burst 20 | per tenant | satu tenant dengan banyak user rutin kena 429 |
+| `ai_chat_ip` | 300 r/menit, burst 100 | total backend | banyak tenant aktif bersamaan; set ≈ tenant aktif × rate per tenant, tapi jangan melebihi throughput GPU |
+| `ai_embed` / `ai_embed_ip` | 300 / 3000 r/menit | embedding | backfill besar (`embeddings:backfill`) |
+| `ai_ocr` / `ai_ocr_ip` | 60 / 600 r/menit | OCR (cadangan PaddleOCR, 1 request per halaman) | banyak PDF pindaian diproses bersamaan |
+
+Pantau pembagian beban per tenant di access log (`tenant=<hash>` di akhir baris):
+
+```bash
+docker exec privasimu-gateway sh -c "grep ' 429 ' /var/log/nginx/ai-access.log | grep -o 'tenant=[^ ]*' | sort | uniq -c | sort -rn"
+```
+
+Mencari tenant dari hash (di host backend): `php artisan tinker` → `\App\Services\AiService::tenantHeader('<org_id>')`.
+
+Setelah mengubah config: `docker exec privasimu-gateway nginx -t && docker exec privasimu-gateway nginx -s reload`.
 
 ## Known limitations backend
 
 Per versi backend saat ini:
 
 - **Tidak ada konfigurasi provider via env.** `AI_PROVIDER`, `AI_PROVIDER_URL`, `AI_PROVIDER_API_KEY` di `config/ai.php` hanya "reference" dan tidak dibaca `AiService`.
-- **`ai.local_llm_url`** (System Settings → AI, hint "OnPrem only — Ollama/vLLM endpoint") disimpan tapi tidak dipakai kode mana pun. Jangan andalkan — daftarkan provider seperti Step 2.
-- **Embedding TEI selalu verifikasi TLS**, tidak mengikuti kebijakan on-prem `OutboundHttp`. Butuh CA yang dipercaya atau jalur HTTP internal.
-- **PaddleOCR (`/ocr/`) tidak diintegrasikan.** OCR = Tesseract lokal + model vision.
-- **Skip TLS on-prem hanya untuk IP literal privat / `localhost` / `*.local`**, bukan hostname DNS internal.
-- **Daftar sanksi butuh internet** dan gagal diam-diam (false negative) saat offline; belum ada impor offline.
-- **pgvector tidak ada** di image Postgres compose on-prem backend; RAG butuh image pgvector sebelum migrate.
+- **`ai.local_llm_url`** deprecated dan sudah dihapus dari UI System Settings; tidak dibaca kode mana pun. Daftarkan provider seperti Step 2.
+- **Skip TLS on-prem hanya untuk IP literal privat / `localhost` / `*.local`**, bukan hostname DNS internal — untuk hostname internal pakai `AI_CA_BUNDLE` (Step 4).
+- **`backend/docker/docker-compose.onprem.yml` belum meneruskan `AI_CA_BUNDLE` dan `OCR_PADDLE_*`** (blok `x-ai-env` hanya berisi `AI_TIMEOUT`, `AI_DEPLOYMENT_MODE`, `AI_EMBEDDING_*`). Tambahkan lewat override compose untuk `backend` dan `queue-worker`, atau isi baris `system_settings` (`ai.ca_bundle`, `ocr.paddle_url`, `ocr.paddle_api_key`). Hal yang sama berlaku untuk `TPRM_SANKSI_UNDUH_ONLINE`.
+- **PaddleOCR hanya cadangan** untuk hasil Tesseract yang gagal/tipis, bukan pengganti Tesseract; tidak ada mode "PaddleOCR saja".
+- **Header `X-Privasimu-Tenant` baru dikirim `AiService`.** Panggilan LLM yang tidak lewat `AiService` — streaming AI Agent (`AiAgentController`), AI Chat (`AiChatController`), Avatar, field mapping impor dokumen (`AiFieldMappingService`), vision OCR dan cadangan PaddleOCR (`OcrScannerService`), dan embedding (`EmbeddingService`) — belum membawanya, jadi masih jatuh ke ember per-IP (`ip:<IP backend>`). Header bisa ditambahkan di sana dengan `AiService::tenantHeader($orgId)`.
+- **DB tenant terisolasi tidak otomatis punya pgvector** (provisioner memakai `template0` + user tenant non-superuser). Jalankan `backend/docker/pgvector-upgrade.sql` setelah isolasi.
