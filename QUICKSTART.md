@@ -16,12 +16,14 @@ vi .env  # verify MODELS_DIR, TLS_DIR, GPU IDs
 # 3. Download models (~25 GB, butuh internet)
 bash scripts/download-models.sh
 
-# 4. TLS cert (self-signed untuk testing)
+# 4. TLS cert (self-signed untuk testing). SAN wajib memuat IP/DNS yang
+#    dipakai backend Privasimu di API Base URL (ganti 10.0.0.50).
 mkdir -p /opt/privasimu/tls
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout /opt/privasimu/tls/privkey.pem \
   -out /opt/privasimu/tls/fullchain.pem \
-  -subj '/CN=privasimu-ai-gateway'
+  -subj '/CN=privasimu-ai-gateway' \
+  -addext 'subjectAltName=IP:10.0.0.50,DNS:privasimu-ai-gateway'
 
 # 5. Start
 bash scripts/start.sh
@@ -54,25 +56,22 @@ Setelah `bash scripts/test-endpoints.sh` lulus semua:
 
 ## Connect Privasimu Backend
 
-Di server backend Privasimu klien, edit `.env`:
+Bukan lewat `.env` backend — provider AI adalah pengaturan platform di UI Privasimu (login root/superadmin):
 
-```env
-AI_PROVIDER=openai-compatible
-AI_PROVIDER_BASE_URL=https://<gpu-server-ip>/v1
-AI_PROVIDER_MODEL=qwen3-32b
-AI_PROVIDER_API_KEY=dummy-ignored
+1. **Platform Admin → System Settings → Deployment** → mode `onprem`
+2. **`/settings/ai-providers`** → Tambah Provider, API Base URL `https://<gpu-server-ip>/v1` → Tambah Model, ID Model `qwen3-32b` (= `LLM_SERVED_NAME`)
+3. **Settings → AI Providers** → API key `onprem-no-auth` (min. 8 karakter, vLLM tidak memeriksa) → Test → set model aktif Chat + Agent (+ Document)
+4. Di server backend: `php artisan ai:cek` → mode `agent`/`chat`/`document` harus menunjuk provider on-prem
 
-EMBEDDING_PROVIDER_BASE_URL=https://<gpu-server-ip>/embed
-OCR_PROVIDER_BASE_URL=https://<gpu-server-ip>/ocr
-```
+Backend on-prem wajib punya `APP_KEY` tetap (compose on-prem gagal start tanpa itu): buat sekali dengan `echo "base64:$(openssl rand -base64 32)"`, jangan diganti saat update.
 
-Restart backend, buka Privasimu dashboard → AI Agent → test chat.
+Tidak perlu restart backend. Buka dashboard → AI Agent → test chat. Detail (embedding TEI, vision, TLS, offline): [`docs/PRIVASIMU_INTEGRATION.md`](./docs/PRIVASIMU_INTEGRATION.md).
 
 ## Common Gotchas
 
 1. **vLLM OOM saat startup** — turunkan `LLM_GPU_MEM_UTIL` dari 0.80 ke 0.70.
-2. **TLS cert invalid** — backend Privasimu klien harus trust cert self-signed, atau pakai `-k`/allow_self_signed di HTTP client config.
-3. **Rate limit 429** — adjust `limit_req` di `nginx/conf.d/ai-services.conf` sesuai jumlah user.
+2. **TLS cert invalid** — backend Privasimu tidak punya opsi `allow_self_signed`. Chat hanya men-skip verifikasi bila mode `onprem` **dan** URL memakai IP privat; embedding TEI selalu verifikasi, jadi CA gateway harus dipercaya container backend. Lihat Step 4 di integrasi.
+3. **Rate limit 429** — semua request backend datang dari satu IP, jadi zona `ai_chat` (30 r/menit) dibagi semua user. Naikkan `limit_req_zone` di `nginx/nginx.conf` / `burst` di `nginx/conf.d/ai-services.conf`.
 4. **vLLM slow first request** — warmup normal, request ke-2 dan seterusnya cepat.
 
 Untuk troubleshoot detail, lihat [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md).

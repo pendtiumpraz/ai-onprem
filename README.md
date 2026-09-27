@@ -9,8 +9,8 @@ Folder ini **tidak berisi model weight** — model di-download on-site oleh admi
 | Service | Image | Fungsi | Port (internal) |
 |---|---|---|---|
 | **vLLM** | `vllm/vllm-openai:latest` | LLM serving (Qwen3-32B AWQ Q4) | `8000` |
-| **TEI** | `ghcr.io/huggingface/text-embeddings-inference:1.5` | Embedding serving (bge-m3) | `8080` |
-| **PaddleOCR** | `paddlecloud/paddleocr-gpu:latest` | OCR untuk KTP/dokumen fisik | `8868` |
+| **TEI** | `ghcr.io/huggingface/text-embeddings-inference:1.5` | Embedding serving (bge-m3, 1024 dim) | `80` |
+| **PaddleOCR** | `paddlecloud/paddleocr-gpu:latest` | OCR untuk KTP/dokumen fisik (belum dikonsumsi backend, lihat integrasi) | `8868` |
 | **NGINX** | `nginx:1.27-alpine` | Reverse proxy + TLS | `443` |
 | **Prometheus** | `prom/prometheus:latest` | Metrics collector | `9090` |
 
@@ -89,8 +89,9 @@ ai-onprem/
 ├── README.md                      ← You are here
 ├── QUICKSTART.md                  ← Fast-path setup untuk yang sudah berpengalaman
 ├── docker-compose.yml             ← Main orchestration
-├── docker-compose.override.yml    ← Local overrides (ignored by git)
-├── .env.example                   ← Config template — copy ke .env
+├── docker-compose.override.yml    ← Local overrides (opsional, ignored by git)
+├── .env.example                   ← Reference semua variable
+├── .env.profiles/                 ← Profile qwen3-32b / qwen3.6-27b (dipilih via switch-profile.sh)
 ├── nginx/
 │   ├── nginx.conf                 ← Main NGINX config
 │   └── conf.d/
@@ -107,11 +108,13 @@ ai-onprem/
 │   ├── restart.sh                 ← Restart
 │   ├── status.sh                  ← Check health
 │   ├── logs.sh                    ← Tail logs
+│   ├── switch-profile.sh          ← Ganti profile AI
 │   └── test-endpoints.sh          ← Verify endpoints alive + functional
 ├── tests/
 │   ├── test-chat.sh               ← Test LLM chat endpoint
 │   ├── test-embed.sh              ← Test embedding endpoint
-│   └── test-ocr.sh                ← Test OCR endpoint
+│   ├── test-ocr.sh                ← Test OCR endpoint
+│   └── test-vision.sh             ← Test vision (image_url)
 └── docs/
     ├── ARCHITECTURE.md            ← How the stack fits together
     ├── TROUBLESHOOTING.md         ← Common issues + fixes
@@ -121,21 +124,17 @@ ai-onprem/
 
 ## Connecting to Privasimu Backend
 
-Setelah stack up, edit `.env` di backend Privasimu klien:
+Provider AI di backend Privasimu **tidak** diatur lewat `.env` — ini pengaturan platform (database) yang diisi root/superadmin lewat UI dan berlaku untuk semua tenant. Tidak ada code change di backend. Ringkasnya:
 
-```env
-AI_PROVIDER=openai-compatible
-AI_PROVIDER_BASE_URL=http://<gpu-server-ip>:443/v1
-AI_PROVIDER_MODEL=qwen3-32b
-AI_PROVIDER_API_KEY=<optional-token>
+1. **Platform Admin → System Settings → Deployment**: mode `onprem`.
+2. **`/settings/ai-providers`**: Tambah Provider (API Base URL `https://<gpu-server-ip>/v1`) + Tambah Model (ID Model = `LLM_SERVED_NAME`, mis. `qwen3-32b`).
+3. **Settings → AI Providers**: simpan API key (vLLM tidak memeriksa, tapi backend wajib punya key minimal 8 karakter, mis. `onprem-no-auth`), Test, lalu pilih model aktif untuk Chat / Agent / Document.
+4. Opsional RAG: **Platform Config → Model Embedding** mode `API`, lalu **System Settings → AI Embedding** provider TEI, URL `https://<gpu-server-ip>/embed` (butuh PostgreSQL + pgvector dan cert yang dipercaya backend).
+5. Verifikasi: `php artisan ai:cek`.
 
-EMBEDDING_PROVIDER_BASE_URL=http://<gpu-server-ip>:443/embed
-OCR_PROVIDER_BASE_URL=http://<gpu-server-ip>:443/ocr
-```
+Backend on-prem juga wajib punya `APP_KEY` tetap (dibuat sekali, tidak pernah diganti). Untuk site offline, matikan setelan tenant **"AI boleh mengakses internet"**.
 
-Zero code change di backend. Restart `php artisan serve` selesai.
-
-Lihat [`docs/PRIVASIMU_INTEGRATION.md`](./docs/PRIVASIMU_INTEGRATION.md) untuk langkah detail.
+Langkah detail, aturan TLS, OCR/vision, offline, dan known limitations backend: [`docs/PRIVASIMU_INTEGRATION.md`](./docs/PRIVASIMU_INTEGRATION.md).
 
 ## Air-Gap Deployment
 
@@ -160,12 +159,13 @@ Kalau klien minta fully air-gapped (bank, pemerintah):
 3. Transfer `privasimu-ai-images.tar` + `models/` ke GPU server via USB
 4. Di GPU server: `docker load -i privasimu-ai-images.tar`
 5. Lanjut seperti biasa — sudah tidak butuh internet lagi
+6. Sisi backend Privasimu: matikan akses internet AI per tenant, nonaktifkan provider cloud, dan perhatikan screening daftar sanksi yang butuh internet — lihat [bagian offline di PRIVASIMU_INTEGRATION.md](./docs/PRIVASIMU_INTEGRATION.md#deployment-offline--air-gapped-sisi-backend)
 
 ## Security Notes
 
 - GPU server **tidak boleh punya akses Internet egress** setelah setup. Firewall rule di klien-side WAJIB.
 - NGINX TLS mandatory untuk production — lihat `nginx/conf.d/ai-services.conf`
-- Gunakan self-signed cert internal atau CA internal klien (bukan Let's Encrypt — tidak bisa validate tanpa internet)
+- Gunakan cert dari CA internal klien (bukan Let's Encrypt — tidak bisa validate tanpa internet). Self-signed hanya cukup untuk chat via IP privat; embedding TEI selalu memverifikasi TLS — lihat [Step 4 integrasi](./docs/PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway)
 - Model weight + tenant data store di `/opt/privasimu/` dengan `chmod 700` — hanya user `privasimu` yang akses
 
 ## Monitoring

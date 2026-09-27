@@ -177,24 +177,23 @@ Browser atau curl reject self-signed cert.
 
 **Opsi:**
 
-**A. Untuk testing/internal** — bypass:
+**A. Untuk testing/internal:**
 ```bash
 # curl
 curl -k https://...
-
-# Privasimu backend .env
-AI_PROVIDER_ALLOW_SELF_SIGNED=true
 ```
+Backend Privasimu **tidak** punya opsi `allow_self_signed`. Chat/vision men-skip verifikasi TLS hanya bila System Settings → Deployment = `onprem` **dan** API Base URL memakai IP privat (mis. `https://10.0.0.50/v1`). Embedding TEI selalu verifikasi — untuk RAG pakai opsi B.
 
-**B. Untuk production** — pakai cert dari CA internal klien:
+**B. Untuk production** — cert server yang diterbitkan CA internal klien (SAN memuat IP/DNS gateway):
 ```bash
-# Copy cert dari CA klien
-cp company-ca.crt /opt/privasimu/tls/fullchain.pem
-cp company-ca.key /opt/privasimu/tls/privkey.pem
+# Cert server + chain, dan private key-nya (BUKAN key CA)
+cp ai-gateway-fullchain.pem /opt/privasimu/tls/fullchain.pem
+cp ai-gateway-privkey.pem   /opt/privasimu/tls/privkey.pem
 
 # Restart gateway
 docker compose restart gateway
 ```
+Lalu pastikan CA internal dipercaya container backend dan queue-worker Privasimu — lihat [PRIVASIMU_INTEGRATION.md Step 4](./PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway).
 
 ---
 
@@ -215,11 +214,7 @@ Common causes:
 - GPU memory conflict dengan vLLM — set `OCR_GPU_ID=1` (kalau ada GPU kedua)
 - CUDA driver version mismatch — image expect CUDA 11.7, driver terlalu lama
 
-**Workaround** — disable OCR, pakai CPU PaddleOCR atau external service:
-```yaml
-# di docker-compose.yml, comment service ocr
-# di backend Privasimu, set OCR_PROVIDER=cpu atau external
-```
+**Workaround** — disable service OCR (comment service `ocr` di `docker-compose.yml`). Backend Privasimu saat ini tidak memanggil `/ocr/` (OCR-nya Tesseract lokal + model vision), jadi mematikan PaddleOCR tidak memengaruhi fitur backend.
 
 ---
 

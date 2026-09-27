@@ -11,9 +11,9 @@ Dokumen ini menjelaskan bagaimana komponen stack AI Privasimu Nexus on-premise b
 │  ┌────────────────────────────┐                                  │
 │  │  Privasimu Backend (PHP)   │                                  │
 │  │  - Laravel 12              │                                  │
-│  │  - AiService provider      │                                  │
-│  │  - EmbeddingsService       │                                  │
-│  │  - OcrService              │                                  │
+│  │  - AiService (chat/agent)  │                                  │
+│  │  - EmbeddingService (RAG)  │                                  │
+│  │  - OcrScannerService       │                                  │
 │  └────────────┬───────────────┘                                  │
 │               │ HTTPS (internal VLAN)                            │
 │               ↓                                                  │
@@ -101,6 +101,7 @@ Dokumen ini menjelaskan bagaimana komponen stack AI Privasimu Nexus on-premise b
 - **Port**: 8868 (internal)
 - **Language**: `en` (handles Indonesian + English + number)
 - **Use case**: KTP scan, form fisik, receipt OCR
+- **Status integrasi**: backend Privasimu saat ini **belum** memanggil `/ocr/`. OCR backend = Tesseract di container backend + vision fallback ke model LLM/VLM (lihat [PRIVASIMU_INTEGRATION.md](./PRIVASIMU_INTEGRATION.md#step-6--ocr-dan-vision))
 - **Input**: base64 image, output JSON bounding box + text
 
 ### 5. Prometheus
@@ -120,32 +121,40 @@ Dokumen ini menjelaskan bagaimana komponen stack AI Privasimu Nexus on-premise b
 
 ```
 1. User klik "AI Auto-Fill" di ROPA wizard
-2. Privasimu backend:
+2. Privasimu backend (AiService, mode Chat, non-streaming):
    POST https://<gpu-server>/v1/chat/completions
    {
      "model": "qwen3-32b",
      "messages": [...],
-     "tools": [...]
+     "response_format": {"type": "json_object"}
    }
-3. NGINX → vLLM backend
-4. vLLM load model (sudah di VRAM), generate response
-5. Response streamed back via NGINX → backend → UI
-6. Backend parse tool_calls, eksekusi AI Agent tool locally
-7. Result disimpan ke database
+3. NGINX → vLLM, generate response
+4. Backend parse JSON, isi field wizard, catat pemakaian di ai_credit_logs
 ```
 
-### Contoh: PII Scanner Embedding
+### Contoh: AI Agent
 
 ```
-1. Backend scan kolom baru di Information System
-2. Backend batch-kirim 50 sample value:
+1. User kirim pesan di AI Agent
+2. Backend (mode Agent) POST /v1/chat/completions dengan "tools": [...] + streaming
+3. vLLM emit tool_calls (parser hermes)
+4. Backend eksekusi tool lokal via AiAgentToolExecutor (scoped org_id, approval gate untuk write)
+5. Hasil tool dikirim balik ke model sampai jawaban final
+```
+
+### Contoh: RAG (Embedding)
+
+```
+1. User simpan ROPA/DPIA/Breach → observer backend dispatch EmbedRecordJob (queue)
+2. Job memecah teks jadi chunk (~1000 char), batch-kirim:
    POST https://<gpu-server>/embed/embed
-   {"inputs": [...50 values...]}
-3. NGINX → TEI
-4. TEI return 50× vector[1024]
-5. Backend compare ke pre-computed PII category vectors
-6. Classify column PII category berdasar cosine similarity
+   {"inputs": [...chunk...]}
+3. NGINX → TEI, return N × vector[1024]
+4. Backend simpan ke tabel vector_embeddings (pgvector, per org_id)
+5. AI Agent tool search_similar_* → embed query → cosine similarity di Postgres
 ```
+
+Syarat: mode Model Embedding `api` + provider TEI di System Settings, PostgreSQL dengan pgvector. Detail di [PRIVASIMU_INTEGRATION.md Step 5](./PRIVASIMU_INTEGRATION.md#step-5--embedding-rag-ke-tei).
 
 ## Data Flow & Storage
 
@@ -181,7 +190,7 @@ Dokumen ini menjelaskan bagaimana komponen stack AI Privasimu Nexus on-premise b
 ## Security Boundary
 
 - GPU server **tidak punya internet egress** setelah setup (firewall rule di klien side)
-- NGINX TLS cert **wajib** untuk production — self-signed boleh untuk internal (backend Privasimu config `allow_self_signed=true`)
+- NGINX TLS cert **wajib** untuk production. Backend Privasimu tidak punya opsi `allow_self_signed`: chat/vision men-skip verifikasi hanya bila deployment mode `onprem` dan URL memakai IP privat; embedding TEI selalu verifikasi. Pakai CA internal klien — lihat [PRIVASIMU_INTEGRATION.md Step 4](./PRIVASIMU_INTEGRATION.md#step-4--tls-antara-backend-dan-gateway)
 - Token auth optional via NGINX — activate kalau klien minta
 - Model weight + config file di `/opt/privasimu/` dengan `chown privasimu:privasimu chmod 700`
 
