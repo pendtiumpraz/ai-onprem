@@ -4,6 +4,31 @@ Deploy-ready AI inference stack untuk Privasimu Nexus on-premise. Run di GPU ser
 
 Folder ini **tidak berisi model weight** — model di-download on-site oleh admin klien via script yang sudah disediakan. Zero bandwidth waste, zero risk model leak via repo.
 
+## Posisi dalam Instalasi On-Premise Privasimu Nexus
+
+Stack ini **opsional**: hanya dipasang bila klien memilih **AI on-premise**. Satu instalasi Privasimu Nexus terdiri atas satu backend (Laravel atau Go) dan tiga aplikasi Next.js — frontend, License Manager, dan Navigator PDP (bonus) — di server aplikasi, ditambah stack ini di server GPU tersendiri. Tiap komponen punya repositori sendiri; tautan diberikan untuk kedua remote bila keduanya ada (`origin` = pendtiumpraz, `privasimu` = organisasi Privasimu).
+
+| Komponen | Peran | Teknologi | origin | privasimu |
+|---|---|---|---|---|
+| Backend — Laravel | Wajib: Laravel **atau** Go | PHP 8.3, Laravel 12 | [pendtiumpraz/priva-back](https://github.com/pendtiumpraz/priva-back) | [Privasimu/api-privasimu-nexus](https://github.com/Privasimu/api-privasimu-nexus) |
+| Backend — Go | Alternatif Laravel | Go 1.26 | [pendtiumpraz/nexus-go](https://github.com/pendtiumpraz/nexus-go) | [Privasimu/go-api-privasimu-nexus](https://github.com/Privasimu/go-api-privasimu-nexus) |
+| Frontend | Wajib | Next.js 16 | [pendtiumpraz/priva-front](https://github.com/pendtiumpraz/priva-front) | [Privasimu/fe-privasimu-nexus](https://github.com/Privasimu/fe-privasimu-nexus) |
+| License Manager | Wajib | Next.js 16, Prisma, PostgreSQL | [pendtiumpraz/priva-license-manager](https://github.com/pendtiumpraz/priva-license-manager) | [Privasimu/license-privasimu-nexus](https://github.com/Privasimu/license-privasimu-nexus) |
+| Navigator PDP | Bonus (opsional) | Next.js, PostgreSQL | [pendtiumpraz/navigator-pdp](https://github.com/pendtiumpraz/navigator-pdp) | — |
+| AI on-prem | Opsional (hanya AI on-premise) | Python: vLLM, TEI, PaddleOCR | [pendtiumpraz/ai-onprem](https://github.com/pendtiumpraz/ai-onprem) | — |
+
+Pilihan AI menentukan servernya (perkiraan untuk 50–100 pengguna per perusahaan):
+
+| | AI berlangganan (penyedia AI cloud yang disetujui) atau tanpa AI | AI on-premise (stack ini) |
+|---|---|---|
+| Server aplikasi | 8 vCPU, 32 GB RAM, 500 GB SSD | Sama |
+| Server GPU | Tidak perlu | Minimum 1× NVIDIA L40S 48 GB, 16 core, 64 GB RAM (2× server aplikasi); disarankan 1× H100/A100 80 GB, 32 core, 128 GB RAM (4× server aplikasi); 2 TB NVMe |
+| Internet keluar | HTTPS ke penyedia AI saja | Tidak perlu (bisa air-gapped) |
+
+- Backend yang memakai stack ini harus **Laravel**: backend Go belum menjalankan inferensi LLM (kebijakan port).
+- Gateway stack ini hanya boleh dijangkau server aplikasi Privasimu (`https://ai.<domain>`), tidak dari jaringan pengguna.
+- Lingkungan uji tidak butuh GPU kedua: pakai gateway yang sama (batas laju per tenant sudah ada) atau matikan AI di lingkungan uji.
+
 ## Isi Stack
 
 | Service | Image | Fungsi | Port (internal) |
